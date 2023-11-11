@@ -1,8 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch_geometric.nn import DenseGraphConv
-from torch_geometric.utils import dense_to_sparse, to_dense_adj
+from torch_geometric.nn import TemporalEncoding
+
+from tgsl.datasets.temporal_graph import TemporalGraph
 
 
 class VariationalInformationBottleneck(nn.Module):
@@ -22,42 +23,37 @@ class VariationalInformationBottleneck(nn.Module):
         z = self.reparameterize(mu, log_var)
         return z, mu, log_var
 
+
 class GraphModelWithIB(nn.Module):
-    def __init__(self, num_nodes, num_features, bottleneck_dim, out_features):
+    def __init__(self, temporal_enc_dim, edge_emb_dim, node_embed_dim):
         super().__init__()
-        self.ib_layer = VariationalInformationBottleneck(num_features, bottleneck_dim)
-        self.edge_weights = nn.Parameter(torch.randn(num_nodes, num_nodes))
-        self.conv1 = DenseGraphConv(bottleneck_dim, out_features)
+        self.te = TemporalEncoding(out_channels=temporal_enc_dim)
+        self.lin1 = nn.Linear(2 * node_embed_dim + temporal_enc_dim + 1,
+                              edge_emb_dim)
+        self.mask = nn.Sequential(nn.Linear(edge_emb_dim, 1), nn.Sigmoid())
 
-    def forward(self, data):
-        x, adj = data.x, to_dense_adj(data.edge_index, max_num_nodes=data.num_nodes)[0]
+    def forward(self, aug_graph: TemporalGraph) -> TemporalGraph:
+        # processed by attention module
+        # It is the concatenation of node emb from DGN after IB and edge_weight
+        edge_attr = aug_graph.edge_attr
+        edge_emb = self.generate_edge_emb(edge_attr, aug_graph.edge_time)
+        edge_mask = self.mask(edge_emb)
+        aug_graph.edge_weight *= edge_mask
 
-        z, mu, log_var = self.ib_layer(x)
-        edge_mask = torch.sigmoid(self.edge_weights)
-        masked_adj = adj * edge_mask
+        return aug_graph
 
-        sparse_adj = dense_to_sparse(masked_adj)[0]
-        out = self.conv1(z, sparse_adj)
-        return out, mu, log_var, edge_mask
+    def generate_edge_emb(self, edge_attr, edge_time):
+        # Get node embeddings for source and destination nodes
+        # node_embs_src = node_emb[edge_time, edge_index[0, :], :]
+        # node_embs_dst = node_emb[edge_time, edge_index[1, :], :]
+
+        te = self.te(edge_time)
+        edge_emb = self.lin1(torch.cat([edge_attr, te], dim=1))
+        return edge_emb
 
     def loss(self, prediction, target, mu, log_var, edge_mask, beta=1.0):
         task_loss = F.nll_loss(prediction, target)
         kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        edge_loss = F.mse_loss(edge_mask, torch.zeros_like(edge_mask), reduction='sum')
+        edge_loss = F.mse_loss(
+            edge_mask, torch.zeros_like(edge_mask), reduction='sum')
         return task_loss + beta * kl_loss + edge_loss
-
-# Assume data is a PyG Data object with x and edge_index fields
-num_nodes = data.num_nodes
-num_features = data.num_node_features
-bottleneck_dim = 32  # or any appropriate bottleneck dimension
-out_features = data.y.max().item() + 1  # for classification tasks
-
-model = GraphModelWithIB(num_nodes, num_features, bottleneck_dim, out_features)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-
-for epoch in range(200):  # adjust epochs according to your dataset
-    optimizer.zero_grad()
-    out, mu, log_var, edge_mask = model(data)
-    loss = model.loss(F.log_softmax(out, dim=1), data.y, mu, log_var, edge_mask, beta=1.0)
-    loss.backward()
-    optimizer.step()
