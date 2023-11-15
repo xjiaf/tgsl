@@ -1,4 +1,11 @@
 import torch
+from torch import LongTensor
+from torch_geometric.sampler import (
+    NeighborSampler,
+    NodeSamplerInput
+    )
+
+from datasets.temporal_graph import TemporalGraph
 
 
 def gumbel_softmax(logits, temperature=1.0, eps=1e-10):
@@ -26,3 +33,32 @@ def gumbel_softmax(logits, temperature=1.0, eps=1e-10):
 
     # Apply softmax to convert the scaled logits into probabilities
     return torch.softmax(scaled_logits, dim=-1)
+
+
+def get_neighbors(graph: TemporalGraph, num_neighbors: int, node_list:
+                  LongTensor, node_time: LongTensor, device):
+    """
+    Get the neighbor sampler for the given graph and node list.
+
+    Returns:
+        sampler_output: SamplerOutput
+    """
+    sampler = NeighborSampler(
+        data=graph,
+        num_neighbors=num_neighbors,
+        temporal_strategy='uniform',
+        time_attr='edge_time'
+    )
+
+    # sampling
+    sampler_output = sampler.sample_from_nodes(
+        NodeSamplerInput(input_id=None, node=node_list, time=node_time)
+    )
+
+    edge_index = torch.stack([sampler_output.row, sampler_output.col],
+                             dim=0, device=device)
+    x = graph.x[sampler_output.node].to(device)
+    edge_time = graph.edge_time[sampler_output.edge].to(device)
+    edge_weight = graph.edge_weight[sampler_output.edge].to(device)
+
+    return edge_index, x, edge_time, edge_weight
