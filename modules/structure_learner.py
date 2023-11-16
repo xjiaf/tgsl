@@ -31,7 +31,8 @@ class StructureLearner(Module):
             dropout=dropout)
         self.mlp = nn.Sequential(
             nn.Linear(graph.num_node_features + te_emb_dim + 1, 1),
-            nn.LeakyReLU())
+            nn.Softplus()  # Keep the edge weight positive
+            )
 
     def forward(self, target_node_ids: LongTensor,
                 target_node_times: LongTensor) -> TemporalGraph:
